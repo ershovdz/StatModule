@@ -140,26 +140,26 @@ uint64_t StatBlock::UpdateBuffer()
 
 	/**********************************************
 	 * CASE 1:
-	 *			 ____ <== _startTime
-	 *			|____|
+	 *	     ____ <== _startTime
+	 *	    |____|
 	 *_statBuf  |____|<== cur_interval is here now
-	 *			|____|
-	 *			|____|<== _startTime + _interval
+	 *	    |____|
+	 *	    |____|<== _startTime + _interval
 	 ***********************************************/
 	if(shift < _bufSize)
 		return shift;
 
 	/**********************************************
 	 * CASE 2:
-	 *			 _____ <== _startTime
-	 *			|stale|
-	 *			|stale|
-	 *			|_____|
+	 *	     _____ <== _startTime
+	 *	    |stale|
+	 *	    |stale|
+	 *	    |_____|
 	 *_statBuf  |_____|<== _startTime + _interval
-	 *			|_____|
-	 *			|_____|<== cur_interval is here now
-	 *			|_____|
-	 *			|_____|<== _startTime + 2*_interval
+	 *	    |_____|
+	 *	    |_____|<== cur_interval is here now
+	 *	    |_____|
+	 *	    |_____|<== _startTime + 2*_interval
 	 ***********************************************/
 	if(cur_interval - _interval  < _interval)
 	{
