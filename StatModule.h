@@ -3,6 +3,12 @@ typedef StatBlock* STAT_HANDLE;
 
 #include <stdint.h>
 
+/*******************************************************
+* class StatModule
+*
+* Main class
+* Provides API for collecting and refreshing statistics
+*******************************************************/
 class StatModule
 {
 public:

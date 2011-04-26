@@ -13,9 +13,17 @@
 using namespace boost::posix_time;
 using namespace boost::interprocess;
 
+/***********************************************
+* class StatElement
+*
+* Stores statistic for period = interval/bufSize
+************************************************/
+
 class StatElement
 {
-public:
+	friend class StatBlock;
+
+protected:
 	StatElement()
 	: _totalDuration(0)
 	, _minDuration(-1)
@@ -30,7 +38,8 @@ public:
 	, _callsCounter(callsCounter)
 	{
 	};
-public:
+
+protected:
 	uint64_t _totalDuration;
 	uint64_t _minDuration;
 	uint64_t _maxDuration;
@@ -39,10 +48,16 @@ public:
 
 
 typedef allocator<StatElement, managed_shared_memory::segment_manager>  ShmStatElementAllocator;
-typedef boost::circular_buffer<StatElement, ShmStatElementAllocator>    ShmStatElementList;
+typedef boost::circular_buffer<StatElement, ShmStatElementAllocator>    ShmStatElementsBuffer;
 typedef scoped_lock<interprocess_mutex>									ScopedLocker;
 typedef scoped_lock<named_mutex>										NamedMutexLocker;
 
+/****************************************************
+* class StatBlock
+*
+* Stores StatElement objects for given block
+* and provides functionality for API of StatModule
+****************************************************/
 class StatBlock
 {
 public:
@@ -63,12 +78,19 @@ private:
 	uint64_t UpdateBuffer();
 
 private:
-	ShmStatElementList _statBuf;
+	ShmStatElementsBuffer _statBuf;
 	ptime _startTime;
-	interprocess_mutex _blockMutex;
+	interprocess_mutex _blockMutex; //may be spinlock is more suitable here
 	const uint64_t _interval;
 	const uint64_t _bufSize;
 };
+
+/*********************************************
+* class StatBlockStorage
+*
+* Stores globals StatBlock objects
+* and provides wrapper for shared memory
+*********************************************/
 
 class StatModule::StatBlockStorage
 {
@@ -80,15 +102,14 @@ public:
 private:
 	StatBlockStorage(void);
 	StatBlockStorage(const StatBlockStorage&) {};
-	~StatBlockStorage();
 
 private:
-	managed_shared_memory _shmSegment;
-	static StatBlockStorage* _pStorageInstance;
-	uint64_t _localRefCounter;
-	named_semaphore* _pInterprocessRefCounter;
+	managed_shared_memory 		_shmSegment;
+	uint64_t 					_localRefCounter;
+	uint64_t volatile* 			_pInterprocessRefCounter; //pointer to counter, stored in shared memory
 
-	static const uint64_t SEGMENT_SIZE;
+	static StatBlockStorage* 	_pStorageInstance;
+	static const uint64_t 		SEGMENT_SIZE;
 };
 
 
@@ -121,7 +142,7 @@ uint64_t StatBlock::UpdateBuffer()
 	 * CASE 1:
 	 *			 ____ <== _startTime
 	 *			|____|
-	 *_statBuf	|____|<== cur_interval is here now
+	 *_statBuf  |____|<== cur_interval is here now
 	 *			|____|
 	 *			|____|<== _startTime + _interval
 	 ***********************************************/
@@ -134,7 +155,7 @@ uint64_t StatBlock::UpdateBuffer()
 	 *			|stale|
 	 *			|stale|
 	 *			|_____|
-	 *_statBuf 	|_____|<== _startTime + _interval
+	 *_statBuf  |_____|<== _startTime + _interval
 	 *			|_____|
 	 *			|_____|<== cur_interval is here now
 	 *			|_____|
@@ -142,10 +163,10 @@ uint64_t StatBlock::UpdateBuffer()
 	 ***********************************************/
 	if(cur_interval - _interval  < _interval)
 	{
-		printf("\n\n CASE 2 \n\n");
+		//printf("\n\n CASE 2 \n\n");
 
 		shift -= _bufSize - 1;
-		for(uint64_t i = 0; i < shift; i++)
+		for(uint64_t i = 0; i < shift; ++i)
 		{
 			_statBuf.push_back(StatElement()); //remove stale StatElement and insert new
 		}
@@ -153,24 +174,24 @@ uint64_t StatBlock::UpdateBuffer()
 		_startTime += microseconds(shift*(_interval/_bufSize));
 		return _bufSize;
 	}
-	printf("\n\n CASE 3 \n\n");
+	//printf("\n\n CASE 3 \n\n");
 	/******************************************************************************
 	 * CASE 3:
-	 *			 _____ <== _startTime						 		 ____ <== _startTime,
-	 *			|stale|												|____|<== cur_interval is here now
-	 *			|stale|												|____|
-	 *			|stale|												|____|
-	 *_statBuf 	|stale|<== _startTime + _interval					|____|
-	 *			|stale|												|____|
-	 *			|stale|                              Clear _statBuf	|____|<== _startTime + _interval
-	 *			|stale|					==============>
-	 *			|stale|<== _startTime + 2*_interval
-	 *			|_____|
-	 *			|_____|<== cur_interval is here now
-	 *			|_____|
-	 *			|_____|<== _startTime + 3*_interval
+	 *	      _____ <== _startTime                                    ____ <== _startTime,
+	 *	     |stale|					             |____|<== cur_interval is here now
+	 *	     |stale|						     |____|
+	 *	     |stale|						     |____|
+	 *_statBuf   |stale|<== _startTime + _interv                         |____|
+	 *	     |stale|						     |____|
+	 *	     |stale|                              Clear _statBuf     |____|<== _startTime + _interval
+	 *	     |stale|				  ==============>
+	 *	     |stale|<== _startTime + 2*_interval
+	 *	     |_____|
+	 *	     |_____|<== cur_interval is here now
+	 *	     |_____|
+	 *	     |_____|<== _startTime + 3*_interval
 	 ********************************************************************************/
-	for(uint64_t i = 0; i < _bufSize; i++)
+	for(uint64_t i = 0; i < _bufSize; ++i)
 	{
 		_statBuf[i]._callsCounter	= 0;
 		_statBuf[i]._totalDuration	= 0;
@@ -192,7 +213,7 @@ void StatBlock::AddCallInfo(uint64_t callDuration)
 	{
 		_statBuf[shift]._callsCounter++;
 		_statBuf[shift]._totalDuration += callDuration;
-		if(1 == _statBuf[shift]._callsCounter || _statBuf[shift]._minDuration > callDuration)
+		if(_statBuf[shift]._minDuration > callDuration)
 			_statBuf[shift]._minDuration = callDuration;
 		else if(_statBuf[shift]._maxDuration < callDuration)
 			_statBuf[shift]._maxDuration = callDuration;
@@ -201,15 +222,15 @@ void StatBlock::AddCallInfo(uint64_t callDuration)
 	{
 		_statBuf[_bufSize - 1]._callsCounter  = 1;
 		_statBuf[_bufSize - 1]._totalDuration = callDuration;
-		_statBuf[_bufSize - 1]._minDuration	 = callDuration;
+		_statBuf[_bufSize - 1]._minDuration   = callDuration;
 		_statBuf[_bufSize - 1]._maxDuration   = callDuration;
 	}
 	else if(shift  > _bufSize) //case 3, buffer is clear now
 	{
-		_statBuf[0]._callsCounter = 1;
+		_statBuf[0]._callsCounter  = 1;
 		_statBuf[0]._totalDuration = callDuration;
-		_statBuf[0]._minDuration = callDuration;
-		_statBuf[0]._maxDuration = callDuration;
+		_statBuf[0]._minDuration   = callDuration;
+		_statBuf[0]._maxDuration   = callDuration;
 	}
 }
 
@@ -222,10 +243,10 @@ uint64_t StatBlock::GetAvgDuration()
 	uint64_t totalTime = 0;
 	uint64_t totalCallCount = 0;
 
-	for(uint64_t i = 0; i < _bufSize; i++)
+	for(uint64_t i = 0; i < _bufSize; ++i)
 	{
-		totalTime  += _statBuf[i]._totalDuration;
-		totalCallCount += _statBuf[i]._callsCounter;
+		totalTime  	+= _statBuf[i]._totalDuration;
+		totalCallCount 	+= _statBuf[i]._callsCounter;
 	}
 
 	if(totalCallCount)
@@ -243,7 +264,7 @@ uint64_t StatBlock::GetMaxDuration()
 
 	uint64_t maxDuration = 0;
 
-	for(uint64_t i = 0; i < _bufSize; i++)
+	for(uint64_t i = 0; i < _bufSize; ++i)
 	{
 		if(maxDuration <  _statBuf[i]._maxDuration)
 			maxDuration =  _statBuf[i]._maxDuration;
@@ -259,7 +280,7 @@ uint64_t StatBlock::GetMinDuration()
 
 	uint64_t minDuration = _statBuf[0]._minDuration;
 
-	for(uint64_t i = 1; i < _bufSize; i++)
+	for(uint64_t i = 1; i < _bufSize; ++i)
 	{
 		if(minDuration >  _statBuf[i]._minDuration)
 			minDuration =  _statBuf[i]._minDuration;
@@ -297,14 +318,8 @@ const uint64_t StatModule::StatBlockStorage::SEGMENT_SIZE = 2091008;
 StatModule::StatBlockStorage::StatBlockStorage()
 :_shmSegment(open_or_create, "STATBLOCK_STORAGE", SEGMENT_SIZE) // can throw
 , _localRefCounter(1)
+, _pInterprocessRefCounter(0)
 {
-}
-StatModule::StatBlockStorage::~StatBlockStorage()
-{
-	if(_pInterprocessRefCounter)
-	{
-		delete _pInterprocessRefCounter;
-	}
 }
 
 StatModule::StatBlockStorage* StatModule::StatBlockStorage::CreateStorage()
@@ -317,33 +332,25 @@ StatModule::StatBlockStorage* StatModule::StatBlockStorage::CreateStorage()
 		if(_pStorageInstance)
 		{
 			_pStorageInstance->_localRefCounter++;
+			printf("\nCurrent thread counter = %llu\n", _pStorageInstance->_localRefCounter);
 			return _pStorageInstance;
 		}
 
 		_pStorageInstance = new StatBlockStorage();
 
-		// let's try to obtain ref counter
-		try // how to check whether a named_semaphore already exits ?
-		{
-			printf("TRY TO CREATE REF COUNTER \n\n");
-			_pStorageInstance->_pInterprocessRefCounter = new named_semaphore(create_only, "STATBLOCK_STORAGE_REF_COUNTER", 0);
-		}
-		catch(...) // may be named_semaphore already exists
-		{
-			printf("TRY TO INCREMENT REF COUNTER \n\n");
-			_pStorageInstance->_pInterprocessRefCounter = new named_semaphore(open_only, "STATBLOCK_STORAGE_REF_COUNTER");
-			_pStorageInstance->_pInterprocessRefCounter->post(); //we must increment counter only in case of opening semaphore
-		}
+		// increment interprocess ref counter
+		_pStorageInstance->_pInterprocessRefCounter = _pStorageInstance->_shmSegment.find_or_construct<uint64_t>("STATBLOCK_STORAGE_REF_COUNTER")(0);
+		(*(_pStorageInstance->_pInterprocessRefCounter))++;
+
+		printf("Current proc counter = %llu\n", *(_pStorageInstance->_pInterprocessRefCounter));
 	}
 	catch(...) // could not create storage or obtain ref counter
 	{
-		printf("\n !!! EXCEPTION !!! \n\n");
 		if(_pStorageInstance) //we have created a first instance, so we can delete it
 		{
-			printf("\n !!! DELETE STORAGE INSTANCE !!! \n");
 			try
 			{
-				delete _pStorageInstance; //ref counter is deleted in the destructor
+				delete _pStorageInstance;
 			}
 			catch(...) //shit happens
 			{
@@ -366,11 +373,14 @@ void StatModule::StatBlockStorage::RemoveStorage()
 		if(_pStorageInstance)
 		{
 			_pStorageInstance->_localRefCounter--;
+			printf("\nCurrent thread counter = %llu\n\n", _pStorageInstance->_localRefCounter);
+
 			if(0 == _pStorageInstance->_localRefCounter) // last thread
 			{
-				if(false == _pStorageInstance->_pInterprocessRefCounter->try_wait()) // last process
+				(*(_pStorageInstance->_pInterprocessRefCounter))--;
+				printf("\nCurrent proc counter = %llu\n", *(_pStorageInstance->_pInterprocessRefCounter));
+				if(0 == *(_pStorageInstance->_pInterprocessRefCounter)) // last process
 				{
-					_pStorageInstance->_pInterprocessRefCounter->remove("STATBLOCK_STORAGE_REF_COUNTER");
 					shared_memory_object::remove("STATBLOCK_STORAGE");
 
 					printf("\n SHARED MEMORY IS REMOVED \n");
@@ -401,25 +411,12 @@ class StatModule
  ********************************/
 StatModule::StatModule(): _interval(600) // 10 minutes, by default
 {
-	try
-	{
-		pStorage = StatModule::StatBlockStorage::CreateStorage();
-	}
-	catch(...)
-	{
-		pStorage = 0;
-	}
+	pStorage = StatModule::StatBlockStorage::CreateStorage();
 }
 
 StatModule::~StatModule()
 {
-	try
-	{
-		StatModule::StatBlockStorage::RemoveStorage();
-	}
-	catch(...)
-	{
-	}
+	StatModule::StatBlockStorage::RemoveStorage();
 	pStorage = 0;
 }
 
